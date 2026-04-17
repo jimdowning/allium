@@ -1,65 +1,68 @@
 # Proposal: User journeys
 
-**Status:** pre-proposal sketch, gathering initial reactions
-**Revision:** v2 — reframed around information sufficiency after author feedback
+**Status:** v3 — pre-proposal, ready for the full PROPOSE.md protocol
 **Scope:** new top-level section `journeys`, with a `journey` construct that declares a named outcome for an actor and asserts that the surfaces and rules along a path gather enough information to realise that outcome
 
 ---
 
 ## Motivation
 
-Working with Allium in anger, the author observed that it is easy to produce
-specs which are necessary but not sufficient: the rules are each well-formed,
-but nothing in the spec asserts that they collectively support a user's
-intended outcome. A surface might collect four of the five fields a downstream
-rule needs; a rule might require a score that no earlier step establishes; an
-escalation policy might depend on a field that is never captured. The checker
-cannot currently see these gaps because no construct ties the relevant
-surfaces, captures and rules into a single path with a stated goal.
+Working with Allium in anger surfaces a failure mode the current language
+cannot catch: specifications that are necessary but not sufficient. Each rule
+is well-formed in isolation, each surface contract is internally consistent,
+each entity carries the fields its own operations need — and yet the spec as
+a whole does not guarantee that a user's intended outcome can be achieved.
+A surface collects four of the five fields a downstream rule requires; a rule
+needs a score no earlier step establishes; an escalation policy depends on a
+field that is never captured at a user-facing boundary. The checker cannot see
+these gaps because no construct ties the relevant surfaces, captures and rules
+into a single path with a stated goal.
 
-This is the same weakness that afflicts UI mockups: a wireframe can look
+The most trivial form of this failure is a missed surface. An author writes a
+surface for collecting information and another for acting on it, each
+internally consistent, but forgets the intermediate surfaces that bridge them
+— a review step, a triage handoff, a reviewer-facing queue. The collection
+surface is well-formed, the action surface is well-formed, and yet no path
+between them exists. Per-surface review does not catch this because each
+surface is fine in isolation; the gap is relational. A journey with a declared
+outcome names the relation, and the checker flags the missing link as an
+unsatisfiable step.
+
+This is the failure mode that afflicts UI mockups: a wireframe can look
 complete while silently omitting fields required by downstream logic. The
-problem is general to artefacts that describe parts of a system but not the
-flow of information across them toward an outcome.
+problem is general to artefacts that describe the parts of a system but not
+the flow of information across those parts toward an outcome.
+
+A secondary motivation, held as a hedge rather than a normative claim:
+journeys compose surfaces in a way that makes generation of a runnable
+skeleton tractable. A spec whose journeys are complete — declared surfaces,
+declared captures, declared rules, declared outcomes — describes enough of
+the IO structure of an application that a clickable prototype can be produced
+from it, with business-logic rule bodies remaining to be implemented. This is
+not a requirement the construct must satisfy. It is a direction that
+justifies the construct being shape-aware about surfaces rather than purely
+narrative.
 
 ## The idea in one paragraph
 
 A `journey` names an actor, declares an outcome the actor achieves, and lists
 the ordered steps that realise it. Each step references an existing surface
-action or rule and declares what it `captures` or `establishes`. The terminal
-step declares what it `needs`. The checker walks the path, accumulates the set
-of captured/established fields, and verifies that every `needs` entry at each
-step is a subset of what has been gathered so far. Referential integrity
-(every `via` target exists) and reachability (every declared outcome is named
-by some step) are checked as a by-product. Journeys add no runtime semantics:
-they do not constrain when rules fire.
+action or rule and declares what it `captures` or `establishes` in typed
+field identifiers. Steps that consume information declare what they `need`.
+The checker walks the DAG of steps, accumulates the set of captured and
+established fields at each point, and verifies that every `needs` entry is a
+subset of what has been gathered by the step's predecessors. Referential
+integrity (every reference resolves) and acyclicity (no cycles in the DAG)
+are checked as by-products. Journeys add no runtime semantics: they do not
+constrain when rules fire. They are static assertions about the information
+structure of a path to an outcome.
 
-## Why this might matter
-
-- **Sufficiency is a genuinely new check.** Nothing in the current language
-  asserts that a path through surfaces and rules gathers enough information
-  to support its stated outcome. This is exactly the class of bug that
-  escapes both rules review (each rule reads correctly in isolation) and UI
-  review (each screen looks complete in isolation).
-- **The check is concrete and local.** At each step, the checker holds a set
-  of established fields and a set of required fields; the question is set
-  inclusion. No global reachability analysis, no theorem proving.
-- **It makes journeys worth writing.** Pure narrative overlays add a
-  documentation obligation without a correspondingly new check. Sufficiency
-  turns journeys into a useful artefact that catches real defects.
-- **Stakeholder communication still follows.** A sufficiency-bound journey
-  still reads as a linear narrative for a product owner, with `achieves`,
-  `captures` and `needs` as domain-facing keywords.
-- **Distillation target.** A distiller examining a codebase can frame its
-  output around journeys: "here are the outcomes this system supports, and
-  here are the fields each one depends on".
-
-## Sketch of syntax
+## Syntax
 
 ```
-----
+------------------------------------------------------------
 -- Journeys
-----
+------------------------------------------------------------
 
 journey CandidateApplies for Candidate {
     achieves: OfferExtended | ApplicationRejected
@@ -75,15 +78,24 @@ journey CandidateApplies for Candidate {
         after: signup
     }
 
-    step interview {
-        via: rule InterviewConducted
-        establishes: interview_score, interviewer_feedback
+    step technical_screen {
+        actor: TechnicalReviewer
+        via: rule TechnicalScreenConducted
+        establishes: technical_score
         after: apply
     }
 
+    step interview {
+        actor: HiringManager
+        via: rule InterviewConducted
+        establishes: interview_score, interviewer_feedback
+        after: technical_screen
+    }
+
     step decide {
+        actor: HiringManager
         via: rule OfferExtended | rule ApplicationRejected
-        needs: email, role_id, resume, interview_score
+        needs: email, role_id, resume, technical_score, interview_score
         after: interview
     }
 
@@ -93,235 +105,275 @@ journey CandidateApplies for Candidate {
 
     @guidance
         A journey asserts that the captures and establishments along its path
-        are sufficient to support its declared outcome. The checker enforces
-        this at validation time.
+        are sufficient for its declared outcome. The validator enforces this
+        at spec-check time; it does not constrain rule execution.
 }
 ```
 
-In this example the checker would pass. If `decide` also needed
-`background_check_status`, the check would fail with a clear local error:
-*step `decide` needs `background_check_status` but no prior step in
-`CandidateApplies` captures or establishes it*.
+### DAG joins and parallel fan-in
 
-## Denotation (first pass)
+A bare list in `after:` denotes alternative predecessors. The captured-set at
+the step is the intersection of its predecessors' captured-sets — only fields
+established by every incoming path are relied upon downstream. This is the
+conservative default.
 
-- **Captured-set(step)** = the union of `captures` on surface-action steps
-  plus `establishes` on rule steps plus the captured-set of every step that
-  this step lists in `after`.
-- **Sufficiency condition(step)** = `needs` ⊆ captured-set(step).
-- **Journey valid** iff sufficiency holds at every step and every element of
-  `achieves` is named by some step's `via`.
+Parallel fan-in (both branches always occur) is opt-in via `all_of(...)`:
 
-Open semantic questions (candidates for the full proposal):
+```
+step decide {
+    after: all_of(interview, background_check)
+    needs: interview_score, background_check_status
+}
+```
 
-1. **What counts as "established" by a rule?** Candidates: (a) fields
-   assigned in `ensures`, (b) only newly-created entities' fields,
-   (c) author-declared `establishes` that the checker cross-validates against
-   `ensures`. (c) is most explicit and matches how `captures` works on
-   surface actions.
-2. **How are derived values handled?** If a field is computed from other
-   captured fields, does it count as established without a declaration?
-   Probably yes, since derivation is deterministic — but the check should be
-   able to explain the chain.
-3. **Conditional captures.** A surface action might only capture a field
-   when a certain option is selected. Sufficiency under branching is
-   subtler; likely defer to v2 of the proposal.
-4. **Pre-existing context.** Fields on entities in `given` are available
-   throughout; they should be in the initial captured-set.
+Under `all_of`, the captured-set is the union, because every listed
+predecessor is asserted to have occurred.
+
+### Nesting and composition
+
+Journeys compose by inclusion. Steps in a nested journey are referenced from
+the parent via dotted paths:
+
+```
+journey SeniorHire for Candidate {
+    achieves: OfferExtended | ApplicationRejected
+
+    includes: CandidateApplies
+
+    step reference_check {
+        actor: Recruiter
+        via: rule ReferenceCheckCompleted
+        establishes: reference_verdict
+        after: CandidateApplies.interview
+    }
+
+    step senior_decide {
+        actor: HiringCommittee
+        via: rule OfferExtended | rule ApplicationRejected
+        needs: email, role_id, technical_score, interview_score, reference_verdict
+        after: reference_check
+    }
+}
+```
+
+The nested journey's captured-set flows into the parent at every step that
+references a nested-journey step as a predecessor. When a step is extracted
+into a sub-journey, its original name remains available as a qualified path
+(`CandidateApplies.interview`) so existing references survive restructuring.
+
+### Multi-actor journeys
+
+The journey-level `for` names the primary actor. Per-step `actor:` overrides
+narrow specific steps to a different declared actor. The validator verifies
+that the named actor is authorised to invoke the step's surface or is
+permitted to participate in the step's rule.
+
+## Denotation
+
+- **captured-set(step)** — for a step S with predecessors P₁…Pₙ:
+  - If the `after:` clause is a bare list: ⋂ᵢ captured-set(Pᵢ) ∪ captures(S) ∪ establishes(S) ∪ given
+  - If the `after:` clause is `all_of(P₁, …, Pₙ)`: ⋃ᵢ captured-set(Pᵢ) ∪ captures(S) ∪ establishes(S) ∪ given
+  - Fields on entities declared in the module's `given` block are in the
+    initial captured-set of every step.
+- **sufficiency condition(step)** — `needs(step) ⊆ captured-set(step)`.
+- **journey valid** — sufficiency holds at every step, every element of
+  `achieves` is named by some step's `via`, the step graph is acyclic, and
+  every referenced step / rule / surface / actor resolves.
+
+### What the check does not guarantee
+
+Sufficiency is an information-presence check, not an information-correctness
+check. It asserts that the fields required by a step have been captured or
+established somewhere earlier in the journey; it does not assert that those
+fields carry correct, valid, or current values. Correctness remains the
+responsibility of rule `requires` clauses and invariants.
+
+## On representation
+
+Entities and rules admit essentially one valid shape per domain fact: if a
+field belongs to a particular entity, that choice is forced. Journeys do not
+have this property. The same domain process can legitimately be represented
+as:
+
+- a linear sequence of steps,
+- a DAG with alternative or parallel paths,
+- a parent journey that includes a nested sub-journey,
+- two sibling journeys that share nothing syntactic,
+
+and the choice depends on judgement the language cannot make (is this process
+reused? does it have a distinct actor? is it always required?). The proposal
+takes the position that this shape-malleability is intentional and not a
+defect. The language validates well-formedness — referential integrity,
+sufficiency, acyclicity, identifier hygiene — but does not enforce a
+canonical shape.
+
+Authoring guidance on when to nest, when to branch, when to extract, and how
+to name steps coherently lives in `references/patterns.md`, not in the
+language. Skills that restructure journeys (principally `tend`) consult the
+patterns file.
+
+## Identifier hygiene
+
+Every name appearing in `captures`, `establishes`, or `needs` must resolve to
+a declared field on an entity or value-type in the spec. Undeclared names are
+a validation error. This is a small authoring discipline for a substantial
+soundness gain: the sufficiency check becomes a subset test over typed
+identifiers rather than string matching over author-chosen labels. Two
+different entities may carry fields with the same name (each lives in its
+own namespace), so step references that could be ambiguous must qualify:
+`Candidate.email` rather than bare `email`.
 
 ## What the construct adds, and what it deliberately does not
 
-**Adds:**
+### Adds
 
-- Actor-scoped, outcome-bound sequences of references to existing rules and
-  surface actions.
-- A sufficiency check: accumulated captures at each step must cover that
-  step's declared needs.
-- Referential-integrity and reachability checks as by-products.
-- A reporting artefact: the skill can render a journey as a narrative for
+- Actor-scoped, outcome-bound DAGs of references to existing surface actions
+  and rules.
+- A sufficiency check: accumulated captures at each step cover that step's
+  declared needs.
+- Referential integrity, identifier hygiene and acyclicity checks as
+  by-products.
+- A composition mechanism (`includes`) with dotted step references.
+- A reporting artefact: tools can render a journey as a linear narrative for
   stakeholder review.
 
-**Does not add:**
+### Does not add
 
-- Any constraint on when rules fire; sufficiency is a static property of the
+- Any constraint on when rules fire. Sufficiency is a static property of the
   declared sequence, not a runtime ordering.
-- A state machine; entity states remain the source of truth for reachability
+- A state machine. Entity states remain the source of truth for reachability
   between states of a single entity.
 - Implementation details (screens, routes, clicks).
+- A canonical shape for the same domain process.
 
-## Design questions still open
+## Skill integration
 
-1. **Linear vs DAG.** Should `after` permit multiple predecessors? DAG is
-   strictly more expressive; sufficiency composes fine across a DAG
-   (captured-set is still a union), but readability suffers.
-2. **Single-actor vs multi-actor.** Many domain journeys include handoffs
-   (candidate → recruiter → hiring manager), and each party contributes
-   different captures. Do we permit `for Candidate, Recruiter` or force
-   separate journeys with explicit interlocks?
-3. **Composition.** Can a journey reuse another as a prefix? Under
-   sufficiency this is natural: the child journey's captured-set becomes the
-   initial captured-set of the parent. But it raises module-boundary
-   questions.
-4. **Relationship to invariants and surfaces.** If sufficiency is
-   checkable, should surfaces and rules be able to declare their own `needs`
-   independently, with journeys being one way to group path checks? (The
-   creative advocate flagged this in v1 and it remains open.)
+### elicit
+
+Journey-first elicitation inverts the current middle phase. Rather than
+tracing state machines per entity, the skill walks outcomes per actor and
+derives entities, rules and surfaces as a by-product.
+
+The skill infers journey-frame suitability from the user's opening prompt
+where possible. A prompt describing actor-driven outcomes ("users apply for
+jobs", "candidates book interview slots") routes to the journey-first flow.
+A prompt describing infrastructural behaviour ("the service breaks circuits
+on failure", "a scheduled job archives stale records") routes to the
+current entity-first flow. The skill asks only when the prompt does not
+disambiguate.
+
+Journey-first elicitation preserves the existing six-phase structure of
+elicit. Phase 2 becomes a journey walkthrough producing the journey block
+directly. Phase 4 gains a sufficiency sweep that verifies each step's
+needs against the accumulated captures, surfacing gaps as open questions.
+The onion-peeling phase structure is retained: sufficiency questions are
+asked in Phase 4, not folded into Phase 2.
+
+### tend
+
+Tend gains a restructuring mode, entered when a change touches an existing
+journey. Simple additions (new rule, new field, new invariant) remain in
+the current additive mode. Changes that insert steps, reorder a path, or
+affect a step referenced by more than one journey trigger structural
+consideration.
+
+When a change has more than one plausible structural shape, tend presents
+the options with their domain tradeoffs and asks the user to choose,
+rather than picking silently. Signals in the user's phrasing ("also",
+"alternative", "shared with") let tend propose a specific option first
+with visible reasoning; genuinely ambiguous phrasing triggers a small-N
+options dialogue.
+
+Authoring guidance for structural choices lives in `patterns.md`; tend
+reads the patterns file rather than duplicating the guidance in its own
+skill description. When tend extracts a step into a sub-journey, the
+original step's name is preserved as a qualified path so external
+references remain stable.
+
+Tend is obliged to re-run sufficiency after any restructuring, update all
+cross-references coherently, and confirm explicitly before any change that
+affects more than one journey or that removes or renames an existing step.
+
+### distill
+
+Distill suggests journey candidates from codebase analysis. Tracing from
+HTTP or CLI entry-points through to terminal writes produces candidate
+paths; each is presented as a suggested journey for the author to accept,
+reject, or reshape. Distill does not commit journey structure silently.
+
+### weed
+
+Weed gains a concrete question to ask of implementation: does the codebase
+expose a surface action for every `via: Surface.action` reference in each
+journey, and does each surface action collect the fields declared as
+`captures`? This is the check that catches the UI-mockup failure mode
+against real code.
+
+### propagate
+
+Propagate uses journeys as anchors for change scope. When a shared rule is
+modified, the set of journeys that reference it identifies which specs
+must be revisited.
 
 ## Alternatives considered
 
-- **Do nothing.** The sufficiency gap is handled ad-hoc by authors
-  re-reading rules after each change. The gap compounds as specs grow.
-- **Invariants rather than journeys.** Instead of a new construct, add a
-  `sufficient_for` modifier to invariants. This preserves one less keyword
-  but loses actor binding and narrative ordering, both of which the domain
-  and readability advocates rate highly.
-- **Annotations on rules.** Tag rules with `part_of: CandidateApplies`.
-  Scatters the journey definition across the spec; incompatible with
-  sufficiency (the checker can't assemble a path from tags without a
-  declared order).
-- **Patterns entry + rendering skill, no language change.** Cheapest option;
-  matches the simplicity advocate's instinct from v1. But it cannot deliver
-  the sufficiency check — the whole point of the revised proposal — because
-  only the parser/validator has access to all required information for the
-  subset check.
+- **Do nothing.** The sufficiency gap is handled ad-hoc by re-reading rules
+  after each change. The gap compounds as specs grow and is the failure
+  mode the proposal exists to address.
+- **`invariant … sufficient_for` modifier.** An invariant carrying the path,
+  captures and needs would save a top-level construct but loses step
+  structure (errors become global pass/fail), loses composition, loses
+  nesting, and loses actor binding beyond a single field. Readability and
+  locality-of-errors are both much worse.
+- **Annotations on rules** (`part_of: CandidateApplies`). Scatters the
+  journey across the spec; cannot support sufficiency because the checker
+  cannot assemble a path from tags without a declared order.
+- **Patterns entry plus rendering skill, no language change.** Delivers
+  referential-integrity checks via skill-level tooling but cannot deliver
+  the sufficiency check, because the checker does not see the whole path
+  and its outcome together.
 
----
+## Backward compatibility
 
-# Panel reactions (v2, on the sufficiency framing)
+The proposal adds a new top-level section and new keywords. It does not
+change the meaning of any existing valid specification. Specs that do not
+use journeys are unaffected and require no migration.
 
-Short version of the TEAM.md protocol: each panellist gives a two-to-four
-sentence initial reaction, no rebuttals. Goal is to see whether the
-sufficiency reframing changes their position.
+The one surface where backward compatibility matters is `establishes`. A
+journey references existing rules, and those rules do not carry an
+`establishes` annotation of their own today. The proposal does not require
+this: `establishes` is declared on the journey step, cross-validated
+against the rule's `ensures` clause. No rule-side change is needed. Rules
+that are not referenced from any journey are not affected.
 
-### Simplicity advocate
+## Open questions (deferred)
 
-Materially shifted. My v1 objection — that this was a view over existing
-constructs deliverable as tooling — is answered: the sufficiency check
-cannot be delivered without the validator seeing the whole path with its
-outcome declared. I still want the minimum viable form to be defended
-against an invariant-with-`sufficient_for` approach, because that might get
-the same check with one fewer top-level concept. But the proposal now has a
-genuine reason to exist.
+These are not blockers for the initial construct and are flagged for a
+subsequent iteration:
 
-### Machine reasoning advocate
+1. **Conditional captures.** A surface action may capture a field only
+   when a certain option is selected. Sufficiency under conditional
+   capture is subtler than under DAG alternatives and deserves dedicated
+   treatment.
+2. **Cross-module journeys.** A journey that spans modules via `use`
+   declarations must resolve step references across module boundaries.
+   The mechanism exists for other constructs and can be extended; the
+   interaction with nested journeys needs care.
+3. **Validator warnings for speculative structure.** The patterns file
+   will encode rules-of-thumb for when to nest vs. when to branch vs. when
+   to extract. Whether any of these rules-of-thumb rise to the level of
+   validator warnings is a judgement call worth revisiting after initial
+   adoption shows which shapes authors actually produce.
 
-Positive. A subset relation over accumulated field sets is exactly the
-shape of check I find tractable: no ambiguity, no surprisal, a clear local
-error when it fails. My one structural concern is that `captures` and
-`establishes` must resolve to the same kind of entity — typed fields or
-something equivalent — otherwise the subset check becomes informal.
-Require both sides to reference declared field identifiers, not free-form
-names.
+## Status and next step
 
-### Composability advocate
+All substantive design questions raised in pre-proposal discussion have
+either been resolved or deferred with a clear rationale. The construct's
+shape is stable: DAG of outcome-bound steps, sufficiency check as a subset
+relation over accumulated captured-sets, composition by nesting with dotted
+step references, shape-malleability accepted as intentional with authoring
+guidance in patterns.
 
-Sufficiency makes composition more important, not less, and the sketch
-defers it. If a child journey's captured-set can feed a parent's, that is
-the first composition story worth writing down; I want it in the proposal
-before adoption. Also: the `after: step_name` reference is local to the
-journey, which is fine, but once journeys compose, step names become a
-namespace concern. Resolve this now or pay later.
-
-### Readability advocate
-
-Still enthusiastic. The reframing adds `captures`, `establishes`, `needs`
-and `achieves`, all of which read naturally to a product audience
-("what does this step capture? what does the decision need?"). If anything
-the sufficiency frame is easier to explain to a non-technical stakeholder
-than the v1 narrative frame, because it answers a question they already
-ask ("do we have enough to make this decision?").
-
-### Rigour advocate
-
-Major shift. The denotation section gives me something to argue with, which
-v1 did not. The subset-relation formulation is clean. The open semantic
-questions (what a rule establishes, derived values, conditional captures)
-are real, but they are tractable and honest. I would also ask for a
-statement of what sufficiency does *not* guarantee — it asserts
-information presence, not information correctness — to prevent
-false-confidence use.
-
-### Domain modelling advocate
-
-Stronger support than v1. "Does this process gather enough to make the
-decision?" is a canonical domain question, and journeys are the right
-locus for it. I reiterate the multi-actor concern: many real journeys have
-handoffs, and each party contributes different captures. A strictly
-single-actor construct will either be under-used or worked around with
-scaffolding. At minimum, allow a journey to name the other actors it
-depends on without making them first-class.
-
-### Developer experience advocate
-
-Positive, conditional on error quality. Sufficiency failures need to point
-at the field, the step that needs it, and the set of prior steps that did
-not provide it — all three. A message like "step `decide` needs
-`interview_score`; checked against captures from steps: signup, apply
-(none establish `interview_score`)" is the bar. Anything less and the
-check becomes frustrating rather than useful. I also want to understand
-the blast radius when a rule adds a new `requires` field: how many
-journeys break, and can the checker group those failures?
-
-### Creative advocate
-
-Encouraged. The reframing is exactly the kind of move I wanted in v1: a
-construct that turns a narrative into a checkable property. Now the
-question is whether journeys are the only place sufficiency should live.
-Consider letting rules and surface-action composites declare their own
-`needs`, with journeys being one way to group path checks. That would make
-sufficiency a cross-cutting property of the language rather than a
-journeys-only feature, which is a bigger idea but potentially a simpler
-language.
-
-### Backward compatibility advocate
-
-Neutral on the core: still a new section, still doesn't change existing
-specs. One real compatibility risk surfaces under sufficiency: if journeys
-later enforce `establishes` declarations on rules, existing rules do not
-have them, and every rule referenced from a journey would need annotation.
-Either keep `establishes` optional with inference from `ensures`, or ship
-a mechanical migration alongside. Do not impose a hand-review burden on
-the installed base.
-
----
-
-# Synthesis (v2)
-
-The reframing answers the hardest v1 objection (simplicity: "why is this a
-language construct?") and gives the proposal a denotation the rigour
-advocate can argue with rather than dismiss. Every panellist's position has
-shifted toward support; the split now is not *whether* to pursue this but
-*how far to take it*.
-
-The work to turn this into a real proposal has narrowed to four items:
-
-1. **Defend the construct against `invariant … sufficient_for`.** Simplicity
-   accepts that sufficiency needs validator support, but wants to see why a
-   new top-level `journey` beats a modifier on existing invariants. The
-   answer probably lies in actor binding and narrative ordering, both of
-   which invariants lack — but the argument must be written.
-
-2. **Nail the data-flow semantics.** What does a rule `establish`? The
-   cleanest answer is author-declared `establishes` cross-validated against
-   `ensures`, with inference for straightforward cases. Derived values fall
-   out of this. Conditional captures are a v2 concern and can be flagged as
-   open.
-
-3. **Decide composition now, not later.** Sufficiency under composition is
-   clean (captured-sets union), so there is no semantic obstacle; the
-   question is purely how to spell it. Pick a spelling before going to the
-   full protocol, so composability has nothing to rebut against.
-
-4. **Error message specification.** Developer experience's bar for error
-   quality is specific enough to write down as part of the proposal, not
-   left to implementation. A one-page "error catalogue" in the proposal
-   would settle this.
-
-Two further questions — multi-actor journeys (domain modelling) and
-sufficiency-as-cross-cutting-property (creative) — are real but can be
-marked as deferred and revisited after v1 of the construct is live. They do
-not block adoption of the narrower form.
-
-**Recommended next step:** write the four items above into a formal proposal
-body and submit to the full PROPOSE.md protocol. The sufficiency reframing
-has cleared the pre-proposal bar.
+**Next step:** submit to the full PROPOSE.md protocol. The panel runs the
+five-stage debate (present, respond, rebut, synthesise, verdict) against
+this document and returns a verdict.
