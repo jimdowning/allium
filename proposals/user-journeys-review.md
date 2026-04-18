@@ -1,24 +1,26 @@
-# Panel review: user journeys (v3)
+# Panel review: user journeys
 
-**Proposal under review:** [`proposals/user-journeys.md`](./user-journeys.md) at SHA `fca0903`
+**Proposal under review:** [`proposals/user-journeys.md`](./user-journeys.md)
 **Protocol:** PROPOSE.md (default disposition: leave the language alone unless the case for change is strong)
 **Panel:** nine-member review panel per TEAM.md
+
+**Cycles run:**
+- Cycle 1 against v3 (SHA `fca0903`) → verdict: Refine
+- Cycle 2 against v4 (SHA `51b2e01`) → verdict: Consensus adopt with reservations
 
 ---
 
 ## Summary
 
-One item was debated: the introduction of a `journey` top-level construct for
-declaring actor-scoped outcomes and checking information sufficiency along
-a DAG of steps realised by existing rules and surface actions. The debate
-established that the problem (specifications that are necessary but not
-sufficient) is real, recurring, and unreachable by any existing construct.
-The proposed form is principled, with a formal denotation and clear
-composition rules. **Verdict: Refine.** Three specific refinements would
-close remaining objections: a more domain-facing spelling for parallel
-fan-in, an explicit error-message catalogue, and a statement on the
-overloading of the `for` keyword. A second cycle against the refined
-proposal would very likely adopt.
+One item was debated across two cycles. The proposed `journey` construct
+addresses a failure mode (specifications that are necessary but not
+sufficient to realise a stated outcome) that is real, recurring, and
+unreachable by any existing construct. Cycle 1 returned a **Refine**
+verdict with three concrete items; cycle 2 against the refined v4 returned
+**Consensus adopt with reservations** on two items. The adopt verdict is
+unanimous; the reservations are recorded but accepted as trade-offs by
+the objecting panellists themselves. The proposal is approved for
+implementation.
 
 ---
 
@@ -276,6 +278,206 @@ from the debate, except where noted):
   found; surface `related:` clauses and the v3 `transitions status {
   ... }` graph are adjacent prior art but do not overlap
   functionally).
-- Per the protocol, a second cycle will run after the refinement items
-  are applied. Expected cycle-2 verdict: consensus adopt, with one or
-  two reservations noted rather than carried.
+- Per the protocol, a second cycle runs after the refinement items are
+  applied.
+
+---
+
+# Cycle 2: against v4 (SHA `51b2e01`)
+
+All three refinement items and all three minor additions from cycle 1
+have been applied. The panel reviews the refined proposal with the
+default disposition: leave the language alone unless the case for change
+is strong, now augmented with the context that cycle 1 established the
+case for change.
+
+## Debate
+
+### Present
+
+v4 applies the cycle 1 refinements:
+- `all_of(...)` replaced with n-ary `and(...)` / `or(...)` that compose
+  to arbitrary depth; bare multi-predecessor lists deprecated
+- `establishes` ↔ `ensures` cross-validation algorithm stated
+- journey-level `for Actor` renamed to `actor: Actor`
+- error-message catalogue added
+- cross-module `includes` named as deferred
+- non-human actor note added
+
+The substantive design questions from cycle 1 are closed. The panel
+evaluates whether the refined form has introduced new problems and
+whether residual cycle 1 concerns have been adequately answered.
+
+### Respond
+
+**Simplicity advocate.** The refinements are sound. `and` / `or` n-ary
+wrappers dispose of the arity problem of `both` and compose naturally,
+which is a cleaner answer than I would have found. My residual concern
+remains total keyword count: v4 introduces roughly a dozen new
+context-keywords, which is a lot for one construct. I accept this as
+the proportionate cost for a checkable sufficiency property, but I
+record it as a reservation rather than withdraw.
+
+**Machine reasoning advocate.** The denotation with recursive
+`eval(E)` is the precise shape I wanted. The `establishes` algorithm is
+now unambiguous. One new concern: `and` and `or` are existing boolean
+operators in expression context, now reused as function-call forms in
+`after:` context. Context disambiguation is workable but creates a
+lexical hazard — a reader scanning an unfamiliar file sees `and(` and
+must infer which role applies. I would record this as a reservation and
+flag it for patterns-level authoring guidance (use newline-separated
+`after:` lines to make intent visible), but not block adoption.
+
+**Composability advocate.** No remaining objection. Cross-module
+deferral is explicitly named. Within-module composition is well-specified.
+
+**Readability advocate.** `and` and `or` are spreadsheet-familiar —
+anyone who has written `=AND(A1, B1)` understands the form immediately.
+The arbitrary-depth composition gives a product owner a readable way to
+describe real-world fan-in. No objection. The error-message catalogue
+is well-judged.
+
+**Rigour advocate.** Cross-validation algorithm is now precise.
+Identifier-hygiene rule is stated. Denotation is complete. One residual
+nit: a rule's `ensures` may assign fields conditionally (`if …: x = …`);
+does a conditional assignment count as establishing `x`? The cleanest
+reading is "yes, unconditionally, because the declaration is a claim
+about which assignments occur in the ensures, not about which paths
+reach them" — but this should be stated. Submit as a patterns-file
+clarification; not a blocker.
+
+**Domain modelling advocate.** No objection. Non-human actors are named.
+Multi-actor journeys work. Consensus on the domain-facing virtues of
+the construct.
+
+**Developer experience advocate.** Error-message catalogue is what I
+asked for. Tend's restructuring mode is declared; I accept it on the
+commitment to produce the three-option dialogue at implementation time.
+I would flag as a follow-up that authoring guidance in patterns should
+include an example of each error message being fixed, so authors see
+the correction pattern, not just the failure. Not a blocker.
+
+**Creative advocate.** Proposal has not lost the ceiling I wanted to
+preserve. Prototype generation remains as motivation; journeys compose
+surfaces cleanly; the `and` / `or` composition is expressive. No
+objection.
+
+**Backward compatibility advocate.** `for` overloading fixed. No
+existing spec is affected. My one residual concern is editor and
+tooling migration: skills (elicit, distill, tend, weed, propagate) all
+gain new responsibilities per the proposal. The proposal commits to this
+but the migration of authoring-guidance in patterns.md is not yet
+written. I accept this on commitment; not a blocker.
+
+### Rebut
+
+**Machine reasoning → the proposal.** On `and` / `or` keyword reuse:
+the practical mitigation is a patterns-file convention to write
+multi-operand `after:` clauses across multiple lines, which makes the
+function-call form visually unambiguous. Adopt the convention; leave
+the grammar alone.
+
+**Simplicity → itself.** On total keyword count: I accept this as
+proportionate. The alternative — expressing sufficiency through
+existing constructs — was shown to be worse in cycle 1. Reservation
+recorded, not carried.
+
+**Rigour → Machine reasoning.** Your keyword-reuse concern is valid
+but matches existing language patterns: `for` was already context-
+disambiguated (expression iteration vs. invariant iteration). Adding
+one more context for `and` / `or` is precedented. I share the
+preference for authoring convention over grammatical distinction.
+
+**DX → the proposal.** Commitment on the three-option dialogue at
+implementation time is acceptable. Patterns-file example-of-each-error
+is a follow-up I can drive myself.
+
+### Synthesise
+
+The panel converged on adoption. Two panellists (simplicity, machine
+reasoning) record reservations — one on total keyword count, one on
+keyword reuse between expression and journey contexts — but both
+explicitly mark these as trade-offs accepted rather than blockers. No
+new objections surfaced that require a third cycle. The rebuttal round
+proposed patterns-file conventions as mitigations for the residual
+concerns, which the affected panellists accepted.
+
+### Verdict: Consensus adopt (with reservations)
+
+The proposal is approved for implementation. Two reservations are
+recorded:
+
+- **Total keyword count** (simplicity advocate). v4 introduces roughly
+  a dozen new context-keywords. Accepted as the proportionate cost of
+  a checkable sufficiency property that no existing construct could
+  deliver. Reservation recorded, not blocking.
+- **`and` / `or` keyword reuse** (machine reasoning advocate). The
+  function-call form in `after:` reuses tokens that are boolean
+  operators in expression context. Accepted as a precedented
+  context-disambiguation, mitigated by a patterns-file convention
+  favouring multi-line `after:` clauses for readability. Reservation
+  recorded, not blocking.
+
+#### Implementation items
+
+For the author and tooling to action:
+
+1. **Update `references/language-reference.md`** with a new
+   `## Journeys` section covering the full syntax, denotation,
+   identifier-hygiene rule and error-message catalogue.
+2. **Update `references/patterns.md`** with authoring guidance on:
+   - when to nest vs. branch vs. extract (shape-malleability guidance),
+   - writing multi-operand `after:` clauses across multiple lines for
+     readability,
+   - conditional `ensures` assignments and what they establish,
+   - one worked example per error-message class showing the correction
+     pattern.
+3. **Update `skills/elicit/SKILL.md`** with journey-first elicitation as
+   the default flow for actor-driven systems, with the entity-first
+   fall-through retained for infrastructural specs, and the prompt-
+   inference heuristic for routing.
+4. **Update `skills/tend/SKILL.md`** with the restructuring mode,
+   including the three-option dialogue pattern and the guardrails
+   (propose-don't-do, cross-journey confirmation, default to smallest
+   structural change, patterns.md as guidance source).
+5. **Update `skills/distill/SKILL.md`** with the suggest-and-iterate
+   pattern for proposing journey candidates from codebase analysis.
+6. **Update `skills/weed/SKILL.md`** with the implementation-
+   consistency check (every `via: Surface.action` has a corresponding
+   handler; every `captures` has a corresponding collection field).
+7. **Update `skills/propagate/SKILL.md`** with journeys as change-scope
+   anchors.
+8. **Update `SKILL.md`** top-level routing to include journeys in the
+   quick syntax summary.
+
+### Key tensions (final)
+
+All cycle 1 tensions resolved through refinement. Two residual
+reservations recorded in cycle 2, both accepted as trade-offs by the
+objecting panellists. No irreducible disagreement.
+
+---
+
+## Deferred items (final)
+
+Carried from the proposal's deferred list; no additions from cycle 2:
+
+1. **Conditional captures.** Surface actions that capture a field only
+   under a specific option. Sufficiency under branching is more subtle
+   than under DAG alternatives.
+2. **Cross-module `includes`.** Named in v4 as not supported in the
+   initial construct; within-module composition only.
+3. **Validator warnings for speculative structure.** Revisit after
+   initial adoption shows which shapes authors actually produce.
+
+---
+
+## Process notes (final)
+
+- The panel read the proposal at `fca0903` (v3) and `51b2e01` (v4),
+  TEAM.md, PROPOSE.md and SKILL.md in full. The language reference and
+  patterns file were consulted for keyword-conflict and prior-art
+  checks.
+- Both cycles are recorded above; cycle 2 was the terminal cycle. The
+  protocol's maximum of two cycles was not exceeded.
+- The implementation items above are the author's action list.
