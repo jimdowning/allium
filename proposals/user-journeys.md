@@ -1,6 +1,6 @@
 # Proposal: User journeys
 
-**Status:** v3 — pre-proposal, ready for the full PROPOSE.md protocol
+**Status:** v4 — refinements from cycle 1 of the PROPOSE.md protocol applied, entering cycle 2
 **Scope:** new top-level section `journeys`, with a `journey` construct that declares a named outcome for an actor and asserts that the surfaces and rules along a path gather enough information to realise that outcome
 
 ---
@@ -64,7 +64,8 @@ structure of a path to an outcome.
 -- Journeys
 ------------------------------------------------------------
 
-journey CandidateApplies for Candidate {
+journey CandidateApplies {
+    actor: Candidate
     achieves: OfferExtended | ApplicationRejected
 
     step signup {
@@ -110,24 +111,51 @@ journey CandidateApplies for Candidate {
 }
 ```
 
-### DAG joins and parallel fan-in
+### DAG joins
 
-A bare list in `after:` denotes alternative predecessors. The captured-set at
-the step is the intersection of its predecessors' captured-sets — only fields
-established by every incoming path are relied upon downstream. This is the
-conservative default.
+A step with a single predecessor uses a bare reference:
 
-Parallel fan-in (both branches always occur) is opt-in via `all_of(...)`:
+```
+step interview { after: apply, ... }
+```
+
+A step with multiple predecessors must declare whether the predecessors are
+combined disjunctively (the step is reached via any one of them) or
+conjunctively (the step is reached after all of them). The two forms are
+n-ary functions `or(...)` and `and(...)`:
+
+```
+step decide { after: or(phone_screen, in_person_screen) }       -- any-of
+step decide { after: and(interview, background_check) }         -- all-of
+```
+
+Under `or(...)` the captured-set at the step is the intersection of its
+operands' captured-sets — only fields established on every incoming path
+are relied upon downstream. This is the conservative default for
+alternative paths.
+
+Under `and(...)` the captured-set is the union, because every operand is
+asserted to have occurred and every operand's establishments are
+available.
+
+The two functions compose freely and nest to arbitrary depth:
 
 ```
 step decide {
-    after: all_of(interview, background_check)
-    needs: interview_score, background_check_status
+    after: and(apply, or(phone_screen, in_person_screen))
 }
 ```
 
-Under `all_of`, the captured-set is the union, because every listed
-predecessor is asserted to have occurred.
+This reads as: `apply` must have completed AND one of `phone_screen` or
+`in_person_screen` must have completed. The resulting captured-set is
+`captured-set(apply) ∪ (captured-set(phone_screen) ∩
+captured-set(in_person_screen))`. The validator computes this by recursive
+descent over the `after:` expression.
+
+The names `and` and `or` are reserved as journey-context keywords in
+`after:` clauses. They do not clash with the boolean operators of the
+same name used in expression contexts, because the parser disambiguates
+by position: `after:` takes a step-reference expression, not a boolean.
 
 ### Nesting and composition
 
@@ -135,7 +163,8 @@ Journeys compose by inclusion. Steps in a nested journey are referenced from
 the parent via dotted paths:
 
 ```
-journey SeniorHire for Candidate {
+journey SeniorHire {
+    actor: Candidate
     achieves: OfferExtended | ApplicationRejected
 
     includes: CandidateApplies
@@ -163,22 +192,63 @@ into a sub-journey, its original name remains available as a qualified path
 
 ### Multi-actor journeys
 
-The journey-level `for` names the primary actor. Per-step `actor:` overrides
-narrow specific steps to a different declared actor. The validator verifies
-that the named actor is authorised to invoke the step's surface or is
-permitted to participate in the step's rule.
+The journey-level `actor:` names the primary actor. Per-step `actor:`
+overrides narrow specific steps to a different declared actor. The
+validator verifies that the named actor is authorised to invoke the step's
+surface or is permitted to participate in the step's rule.
+
+The actor may be any declared actor type, including integration actors
+whose identity derives from a cron trigger or external system rather
+than a user.
 
 ## Denotation
 
-- **captured-set(step)** — for a step S with predecessors P₁…Pₙ:
-  - If the `after:` clause is a bare list: ⋂ᵢ captured-set(Pᵢ) ∪ captures(S) ∪ establishes(S) ∪ given
-  - If the `after:` clause is `all_of(P₁, …, Pₙ)`: ⋃ᵢ captured-set(Pᵢ) ∪ captures(S) ∪ establishes(S) ∪ given
-  - Fields on entities declared in the module's `given` block are in the
-    initial captured-set of every step.
-- **sufficiency condition(step)** — `needs(step) ⊆ captured-set(step)`.
-- **journey valid** — sufficiency holds at every step, every element of
-  `achieves` is named by some step's `via`, the step graph is acyclic, and
-  every referenced step / rule / surface / actor resolves.
+### Captured-set recursion
+
+For a step S with `after:` expression E, the captured-set is:
+
+```
+captured-set(S) = eval(E) ∪ captures(S) ∪ establishes(S) ∪ given
+```
+
+where `eval(E)` returns the captured-set implied by the expression, defined
+by recursive descent:
+
+- `eval(P)` = `captured-set(P)` for a bare step reference P
+- `eval(or(E₁, …, Eₙ))` = ⋂ᵢ `eval(Eᵢ)`
+- `eval(and(E₁, …, Eₙ))` = ⋃ᵢ `eval(Eᵢ)`
+
+Entry steps (no `after:` clause) have `captured-set(S) = captures(S) ∪
+establishes(S) ∪ given`. Fields on entities declared in the module's
+`given` block are available in the initial captured-set of every step.
+
+### `establishes` cross-validation
+
+A name N in a step's `establishes` clause must satisfy one of the
+following, where R is the rule referenced by the step's `via`:
+
+- N appears as the left-hand side of a field assignment in R's `ensures`
+  clause (e.g., `entity.N = value`), or
+- N appears as a field on an entity that R creates via `Entity.created(...)`
+  within its `ensures` clause.
+
+Trigger emissions in `ensures` do not establish fields. Names that appear
+in neither form produce a validation error.
+
+For steps whose `via` references a surface action, `captures` must
+correspond to declared input parameters of that action — a strictly
+narrower check, equivalent to exact match of declared parameter names.
+
+### Validity
+
+A journey is valid when:
+
+- sufficiency holds at every step: `needs(S) ⊆ captured-set(S)`,
+- every element of `achieves` is named by some step's `via`,
+- the step graph is acyclic,
+- every referenced step, rule, surface and actor resolves to a declared
+  entity in scope, and
+- every `establishes` entry satisfies the cross-validation above.
 
 ### What the check does not guarantee
 
@@ -222,6 +292,55 @@ identifiers rather than string matching over author-chosen labels. Two
 different entities may carry fields with the same name (each lives in its
 own namespace), so step references that could be ambiguous must qualify:
 `Candidate.email` rather than bare `email`.
+
+## Error messages
+
+The validator produces four classes of error specific to journeys. Each
+names the journey, the step and the offending reference(s) so the error
+is locally actionable.
+
+### Sufficiency failure
+
+When a step's `needs` set is not a subset of its accumulated captured-set:
+
+```
+error: step `decide` in journey `CandidateApplies` needs
+       `interview_score` but no prior step captures or establishes it.
+       Checked predecessors:
+         - signup (captures: email, name)
+         - apply (captures: role_id, resume)
+```
+
+### Missing predecessor link
+
+When an `after:` expression references a step that is not declared in the
+journey or any included journey:
+
+```
+error: step `decide` in journey `CandidateApplies` lists
+       `technical_screen` as a predecessor, but no such step is declared.
+       Did you mean `apply`?
+```
+
+### Acyclicity violation
+
+When the step graph contains a cycle:
+
+```
+error: cycle detected in journey `CandidateApplies`:
+       decide -> review -> decide. A journey's step graph must be acyclic.
+```
+
+### Identifier-hygiene failure
+
+When a name in `captures`, `establishes` or `needs` does not resolve to a
+declared field on an entity or value type:
+
+```
+error: step `decide` in journey `CandidateApplies` needs
+       `verified_email`, but no entity or value type in scope declares
+       this field. Similar declared fields: `email` on Candidate.
+```
 
 ## What the construct adds, and what it deliberately does not
 
@@ -358,7 +477,9 @@ subsequent iteration:
 2. **Cross-module journeys.** A journey that spans modules via `use`
    declarations must resolve step references across module boundaries.
    The mechanism exists for other constructs and can be extended; the
-   interaction with nested journeys needs care.
+   interaction with nested journeys needs care. In particular,
+   `includes:` referencing a journey declared in another module is not
+   supported in the initial construct; within-module composition only.
 3. **Validator warnings for speculative structure.** The patterns file
    will encode rules-of-thumb for when to nest vs. when to branch vs. when
    to extract. Whether any of these rules-of-thumb rise to the level of
@@ -367,13 +488,19 @@ subsequent iteration:
 
 ## Status and next step
 
-All substantive design questions raised in pre-proposal discussion have
-either been resolved or deferred with a clear rationale. The construct's
-shape is stable: DAG of outcome-bound steps, sufficiency check as a subset
-relation over accumulated captured-sets, composition by nesting with dotted
-step references, shape-malleability accepted as intentional with authoring
-guidance in patterns.
+Cycle 1 of the PROPOSE.md protocol returned a verdict of **Refine** with
+three concrete refinement items and three minor additions. v4 applies all
+six:
 
-**Next step:** submit to the full PROPOSE.md protocol. The panel runs the
-five-stage debate (present, respond, rebut, synthesise, verdict) against
-this document and returns a verdict.
+- `all_of(...)` replaced with n-ary `and(...)` / `or(...)` wrappers that
+  nest to arbitrary depth; bare multi-predecessor lists deprecated in
+  favour of explicit composition.
+- `establishes` ↔ `ensures` cross-validation algorithm stated in the
+  denotation.
+- Journey-level `for Actor` renamed to `actor: Actor`, eliminating the
+  contextual overloading of `for`.
+- Short error-message catalogue added.
+- Cross-module `includes` named as deferred.
+- One-sentence note on non-human actors added.
+
+**Next step:** cycle 2 of the PROPOSE.md protocol against v4.
